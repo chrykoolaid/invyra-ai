@@ -53,13 +53,9 @@ def ai_reason() -> str:
 
 
 def compute_bundle_id(workspace_id: str, day: str, compare_to: str, engine_version: str, schema_version: str) -> str:
-    """Deterministic ID for audit & export correlation.
-
-    Note: This is NOT a security signature. It is a stable identifier derived from
-    request parameters + engine/schema versions.
-    """
-    material = f"{workspace_id}|{day}|{compare_to}|{engine_version}|{schema_version}"
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    """Deterministic ID for audit correlation (does not hash the bundle itself)."""
+    raw = f"{workspace_id}|{day}|{compare_to}|{engine_version}|{schema_version}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def make_manifest_text(bundle: dict) -> str:
@@ -75,53 +71,17 @@ def make_manifest_text(bundle: dict) -> str:
         f"generated_at: {meta.get('generated_at','')}",
         f"audit_safe: {bundle.get('ai_status',{}).get('audit_safe', True)}",
     ]
-    
-# A8: environment context
-ctx = meta.get("env_context") or {}
 
-
-def compute_bundle_id(workspace_id: str, day: str, compare_to: str, engine_version: str, schema_version: str) -> str:
-    """Deterministic ID for audit correlation (does not hash the bundle itself)."""
-    raw = f"{workspace_id}|{day}|{compare_to}|{engine_version}|{schema_version}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def build_manifest_text(bundle: dict) -> str:
-    meta = bundle.get("meta", {})
-    lines = [
-        "Invyra AI Review Evidence Manifest",
-        f"bundle_id: {meta.get('bundle_id', '')}",
-        f"workspace_id: {meta.get('workspace_id', '')}",
-        f"day: {meta.get('day', '')}",
-        f"compare_to: {meta.get('compare_to', '')}",
-        f"engine_version: {meta.get('engine_version', '')}",
-        f"schema_version: {meta.get('schema_version', '')}",
-        f"generated_at_utc: {meta.get('generated_at_utc', '')}",
-        f"decision_mode: {meta.get('decision_mode', '')}",
-        "",
-        "Sections:",
-        f"- ai_status: {'present' if 'ai_status' in bundle else 'missing'}",
-        f"- deterministic_patterns: {'present' if 'deterministic_patterns' in bundle else 'missing'}",
-        f"- ai_explanation: {'present' if 'ai_explanation' in bundle else 'missing'}",
-    ]
-    
     # A8: environment context (if present)
     ctx = meta.get("env_context") or {}
-    lines.append("")
-    lines.append("[ENV_CONTEXT]")
-    lines.append(f"invyra_env={ctx.get('invyra_env','unknown')}")
-    lines.append(f"role={ctx.get('role','unknown')}")
-    lines.append(f"terminal={ctx.get('terminal','unknown')}")
-    lines.append(f"user_id={ctx.get('user_id','unknown')}")
-    lines.append(f"timezone_offset={ctx.get('timezone_offset','unknown')}")
-    lines.append(f"locale={ctx.get('locale','unknown')}")
-    lines.append(f"os={ctx.get('os','unknown')}")
-    lines.append(f"python={ctx.get('python','unknown')}")
-    lines.append(f"arch={ctx.get('arch','unknown')}")
-    lines.append(f"hostname_hash={ctx.get('hostname_hash','unknown')}")
-    lines.append(f"generated_at_utc={ctx.get('generated_at_utc','unknown')}")
-    
+    if ctx:
+        lines.append("")
+        lines.append("[ENV_CONTEXT]")
+        for key in ("invyra_env", "role", "terminal", "user_id", "timezone_offset", "locale", "os", "python", "arch", "hostname_hash", "generated_at_utc"):
+            lines.append(f"{key}={ctx.get(key, 'unknown')}")
+
     return "\n".join(lines) + "\n"
+
 
 app = FastAPI(title="Invyra AI Engine", version=APP_VERSION)
 
@@ -249,7 +209,7 @@ def review_manifest(workspace_id: str, day: str, compare_to: str, x_api_key: Opt
     manifest = make_manifest_text(bundle)
     return Response(content=manifest, media_type="text/plain; charset=utf-8")
 
-UI_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><title>Invyra AI Review (7.9)</title>
+UI_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><title>Invyra AI Review</title>
 <style>
 body{font-family:system-ui,Segoe UI,Arial;margin:24px;max-width:1150px}
 .row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
@@ -262,7 +222,7 @@ button{cursor:pointer}.primary{font-weight:600}.muted{color:#666}
 </style></head><body>
 <h1>AI Explanation Review Panel <span class="badge">READ-ONLY</span></h1>
 <p class="muted">Bundle-first flow. Humans remain in control. No actions are applied.</p>
-<p class="muted"><strong>Build:</strong> sprint-7.9A-test-pack-01</p>
+<p class="muted"><strong>Build:</strong> sprint-A8-env-context-pack-01</p>
 
 <div id="errorBanner" role="alert" aria-live="polite" tabindex="-1" hidden></div>
 
@@ -403,7 +363,6 @@ async function copyBundle(){
   try{
     await navigator.clipboard.writeText(lastBundleText);
   }catch(e){
-    // fallback
     const ta=document.createElement("textarea");
     ta.value=lastBundleText;
     document.body.appendChild(ta);
@@ -412,7 +371,6 @@ async function copyBundle(){
     ta.remove();
   }
 }
-
 
 async function copyBundleId(){
   if(!lastBundleText){showError("No bundle loaded yet."); return;}
