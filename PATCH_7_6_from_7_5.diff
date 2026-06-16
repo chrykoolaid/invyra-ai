@@ -1,0 +1,330 @@
+diff -ru /mnt/data/base_7_5/.github/workflows/ci.yml /mnt/data/work_7_6/.github/workflows/ci.yml
+--- /mnt/data/base_7_5/.github/workflows/ci.yml	2026-02-07 13:05:36.000000000 +0000
++++ /mnt/data/work_7_6/.github/workflows/ci.yml	2026-02-07 14:42:08.028567682 +0000
+@@ -6,19 +6,27 @@
+ 
+ jobs:
+   smoke:
+-    runs-on: windows-latest
++    strategy:
++      fail-fast: false
++      matrix:
++        os: [windows-latest, ubuntu-latest]
++    runs-on: ${{ matrix.os }}
++
+     steps:
+       - uses: actions/checkout@v4
++
+       - uses: actions/setup-python@v5
+         with:
+           python-version: '3.11'
++
+       - name: Install deps
+         run: |
+           python -m pip install --upgrade pip
+           pip install -r requirements.txt
+-      - name: Smoke tests (start + test + stop)
++
++      - name: CI smoke (start server -> test -> stop)
+         env:
+           INVYRA_AI_INGEST_API_KEY: test_key_123
+           INVYRA_PORT: '8080'
+         run: |
+-          python tools/ci_smoke.py
++          python -m tools.ci_smoke
+Only in /mnt/data/work_7_6: PATCH_7_6_from_7_5.diff
+diff -ru /mnt/data/base_7_5/README_TEST.md /mnt/data/work_7_6/README_TEST.md
+--- /mnt/data/base_7_5/README_TEST.md	2026-02-07 13:05:36.000000000 +0000
++++ /mnt/data/work_7_6/README_TEST.md	2026-02-07 14:42:47.493829105 +0000
+@@ -1,19 +1,21 @@
+-# Invyra AI Engine — Sprint 7.5 Test Harness & CI Hardening (Option A)
++# Invyra AI Engine — Sprint 7.6 CI Smoke Hardening
+ 
+-## Manual run
+-1) Double-click `start_sprint7_5.bat`
++Sprint 7.6 is about **making the test harness and CI reliable**:
++- CI smoke is **self-contained** (it starts the server, discovers the port, runs tests, then shuts down).
++- Port handling is robust (reads `.invyra_port` and falls back to probing 8080..8090).
++
++## Manual run (UI)
++1) Double-click `start.bat`
+ 2) Open the printed URL (it will auto-bump the port if 8080 is busy)
+-3) Enter API key `test_key_123` (or your own) and click **Load review bundle (recommended)**
++3) In the UI, use API key `test_key_123` (default) and click **Load review bundle (recommended)**
+ 
+ ## One-command smoke run (recommended)
+-- Double-click `run_smoke_tests_sprint7_5.bat`
+-  - Starts the server
++- Double-click `run_smoke_tests_sprint7_6.bat`
++  - Starts server (subprocess)
++  - Discovers the port
+   - Runs smoke tests
+   - Stops the server
+ 
+-## Smoke tests only (server already running)
+-- Double-click `test_sprint7_5.bat`
+-
+ ## CI
+-- GitHub Actions workflow: `.github/workflows/ci.yml`
+-  - Runs `python tools/ci_smoke.py` on Windows.
++- GitHub Actions: `.github/workflows/ci.yml`
++  - Runs `python -m tools.ci_smoke` on Windows + Ubuntu.
+Only in /mnt/data/work_7_6: SPRINT_7_6_SPEC.md
+diff -ru /mnt/data/base_7_5/app/web.py /mnt/data/work_7_6/app/web.py
+--- /mnt/data/base_7_5/app/web.py	2026-02-07 13:05:36.000000000 +0000
++++ /mnt/data/work_7_6/app/web.py	2026-02-07 14:38:08.076837777 +0000
+@@ -9,7 +9,7 @@
+ from . import storage
+ from .logic import daily_metrics, delta, explain
+ 
+-APP_VERSION = "sprint-7.5-test-pack-01"
++APP_VERSION = "sprint-7.6-test-pack-01"
+ SCHEMA_VERSION = "1.0"
+ 
+ def _expected_key() -> str:
+Only in /mnt/data/work_7_6: run_smoke_tests_sprint7_6.bat
+diff -ru /mnt/data/base_7_5/tools/ci_smoke.py /mnt/data/work_7_6/tools/ci_smoke.py
+--- /mnt/data/base_7_5/tools/ci_smoke.py	2026-02-07 13:10:06.000000000 +0000
++++ /mnt/data/work_7_6/tools/ci_smoke.py	2026-02-07 14:41:08.900756564 +0000
+@@ -1,58 +1,203 @@
+-from __future__ import annotations
++"""CI smoke test runner for Invyra AI Review Engine.
++
++Sprint 7.6 hardening:
++- Self-contained: starts the server, discovers the port, runs smoke tests, then shuts down.
++- Port discovery: reads .invyra_port written by app.server; falls back to probing 8080..8090.
++- Works on Windows/Linux/macOS.
++
++Run:
++    python -m tools.ci_smoke
++
++Environment:
++    INVYRA_AI_INGEST_API_KEY   API key expected by server (default: test_key_123)
++    INVYRA_PORT                preferred port (default: 8080)
++"""
+ 
+-# CI-oriented smoke test runner.
+-# Must be runnable from ANY working directory (double-clicked .bat, CI runner, etc.)
++from __future__ import annotations
+ 
+ import os
++import signal
++import subprocess
+ import sys
++import time
+ from pathlib import Path
+ 
+-ROOT = Path(__file__).resolve().parents[1]
+-if str(ROOT) not in sys.path:
+-    sys.path.insert(0, str(ROOT))
++# Ensure repo root on sys.path when executed from tools/
++REPO_ROOT = Path(__file__).resolve().parents[1]
++if str(REPO_ROOT) not in sys.path:
++    sys.path.insert(0, str(REPO_ROOT))
+ 
+ from tools.test_runner import run_smoke_tests, wait_for_health  # noqa: E402
+ 
+ 
+-def _read_chosen_port(default_port: int) -> int:
+-    """If the server auto-bumped ports, it writes .invyra_port in repo root."""
++PORT_FILE = REPO_ROOT / ".invyra_port"
++
++
++def _load_port_from_file() -> int | None:
++    try:
++        p = PORT_FILE.read_text(encoding="utf-8").strip()
++        if p.isdigit():
++            return int(p)
++    except Exception:
++        return None
++    return None
++
++
++def _probe_for_port(host: str = "127.0.0.1", start: int = 8080, end: int = 8090) -> int | None:
++    """Try a short port range and return the first port that responds to /health."""
++    for port in range(start, end + 1):
++        ok, _err = wait_for_health(host, port, timeout_s=2.0)
++        if ok:
++            return port
++    return None
++
++
++def _start_server() -> subprocess.Popen:
++    env = os.environ.copy()
++    env.setdefault("INVYRA_AI_INGEST_API_KEY", "test_key_123")
++    env.setdefault("INVYRA_PORT", env.get("INVYRA_PORT", "8080"))
++
++    # Clear stale port file (if exists)
+     try:
+-        p = (ROOT / ".invyra_port")
+-        if p.exists():
+-            txt = p.read_text(encoding="utf-8", errors="ignore").strip()
+-            if txt.isdigit():
+-                return int(txt)
++        PORT_FILE.unlink(missing_ok=True)  # py>=3.8 supports missing_ok
+     except Exception:
+         pass
+-    return default_port
++
++    # Start the engine via our server entry (handles auto-bump)
++    cmd = [sys.executable, "-c", "from app.server import run; run()"]
++
++    # On Windows, create a new process group so we can send CTRL_BREAK_EVENT.
++    creationflags = 0
++    if os.name == "nt":
++        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
++
++    return subprocess.Popen(
++        cmd,
++        cwd=str(REPO_ROOT),
++        env=env,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        text=True,
++        bufsize=1,
++        creationflags=creationflags,
++    )
++
++
++def _stop_server(proc: subprocess.Popen) -> None:
++    if proc.poll() is not None:
++        return
++
++    try:
++        if os.name == "nt":
++            # Graceful-ish: send CTRL_BREAK so uvicorn can shutdown
++            proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
++        else:
++            proc.send_signal(signal.SIGINT)
++        proc.wait(timeout=10)
++        return
++    except Exception:
++        pass
++
++    try:
++        proc.terminate()
++        proc.wait(timeout=10)
++        return
++    except Exception:
++        pass
++
++    try:
++        proc.kill()
++    except Exception:
++        pass
++
++
++def _drain_output(proc: subprocess.Popen, max_lines: int = 200) -> str:
++    """Best-effort capture of server output (useful when CI fails)."""
++    lines: list[str] = []
++    if proc.stdout is None:
++        return ""
++
++    # Non-blocking-ish: read a bit
++    start = time.time()
++    while len(lines) < max_lines and time.time() - start < 2.0:
++        line = proc.stdout.readline()
++        if not line:
++            break
++        lines.append(line.rstrip("\n"))
++    return "\n".join(lines)
+ 
+ 
+ def main() -> int:
+-    host = os.getenv("INVYRA_HOST", "127.0.0.1")
+-    port = int(os.getenv("INVYRA_PORT", "8080"))
+-    port = _read_chosen_port(port)
+-    api_key = os.getenv("INVYRA_AI_INGEST_API_KEY", "test_key_123")
+-
+-    print(f"[TEST] Target: http://{host}:{port}  key=***{api_key[-4:]}  (workspace=ws_test_001)")
+-    try:
+-        wait_for_health(host, port)
+-    except Exception as e:
+-        print(f"[FAIL] {e}")
+-        return 2
+-
+-    results = run_smoke_tests(host, port, api_key)
+-    failed = [r for r in results if not r.ok]
+-
+-    for r in results:
+-        status = "PASS" if r.ok else "FAIL"
+-        print(f"[{status}] {r.name}" + (f" :: {r.detail}" if (r.detail and not r.ok) else ""))
+-
+-    if failed:
+-        print(f"\n[SUMMARY] FAIL ({len(failed)}/{len(results)} failed)")
+-        return 1
++    host = "127.0.0.1"
++
++    proc = _start_server()
++    try:
++        # Wait a moment for uvicorn to boot and app.server to write .invyra_port
++        deadline = time.time() + 25.0
++        port: int | None = None
++
++        while time.time() < deadline:
++            if proc.poll() is not None:
++                out = _drain_output(proc)
++                print("[FAIL] Server exited early.")
++                if out:
++                    print("--- server output (tail) ---")
++                    print(out)
++                return 1
++
++            port = _load_port_from_file()
++            if port is not None:
++                break
++            time.sleep(0.2)
++
++        # If still none, probe a small port range
++        if port is None:
++            port = _probe_for_port(host, 8080, 8090)
++
++        if port is None:
++            out = _drain_output(proc)
++            print("[FAIL] Could not determine server port (.invyra_port missing and no /health found).")
++            if out:
++                print("--- server output (tail) ---")
++                print(out)
++            return 1
++
++        ok, err = wait_for_health(host, port, timeout_s=25.0)
++        if not ok:
++            out = _drain_output(proc)
++            print(f"[FAIL] Server not healthy on {host}:{port}. Last error: {err}")
++            if out:
++                print("--- server output (tail) ---")
++                print(out)
++            return 1
++
++        print(f"[OK] Server healthy on http://{host}:{port}")
++
++        api_key = os.environ.get("INVYRA_AI_INGEST_API_KEY", "test_key_123")
++        workspace = os.environ.get("INVYRA_WORKSPACE_ID", "ws_test_001")
++        day = os.environ.get("INVYRA_DAY", "2026-01-30")
++        compare_to = os.environ.get("INVYRA_COMPARE_TO", "2026-01-29")
++
++        results = run_smoke_tests(
++            base_url=f"http://{host}:{port}",
++            api_key=api_key,
++            workspace_id=workspace,
++            day=day,
++            compare_to=compare_to,
++        )
++
++        failed = [r for r in results if not r.ok]
++        if failed:
++            print("\n[FAIL] Smoke tests failed:")
++            for r in failed:
++                print(f"  - {r.name}: {r.detail}")
++            return 1
++
++        print("\n[PASS] Smoke tests passed.")
++        return 0
+ 
+-    print(f"\n[SUMMARY] OK ({len(results)} checks)")
+-    return 0
++    finally:
++        _stop_server(proc)
+ 
+ 
+ if __name__ == "__main__":

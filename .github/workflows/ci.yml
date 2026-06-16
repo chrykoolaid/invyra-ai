@@ -1,0 +1,32 @@
+name: Invyra AI Engine CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: CI smoke (start server -> test -> stop)
+        env:
+          INVYRA_AI_INGEST_API_KEY: test_key_123
+          INVYRA_PORT: '8080'
+        run: |
+          python -m tools.ci_smoke
