@@ -1,6 +1,5 @@
 from __future__ import annotations
 import os
-import hashlib
 import json
 from typing import Optional
 from datetime import datetime, timezone
@@ -10,80 +9,57 @@ from pydantic import BaseModel, Field
 
 from . import storage
 from .logic import daily_metrics, delta, explain
+from .manifest import compute_bundle_id, make_manifest_text
 
-APP_VERSION = "sprint-A8-env-context-pack-01"
+APP_VERSION = "sprint-A8.1-repository-stabilization-01"
 SCHEMA_VERSION = "1.0"
 
+
 def _expected_key() -> str:
-    return os.getenv("INVYRA_AI_INGEST_API_KEY","").strip()
+    return os.getenv("INVYRA_AI_INGEST_API_KEY", "").strip()
+
 
 def _mask_key(k: str) -> str:
     if not k:
         return ""
     if len(k) <= 4:
         return "*" * len(k)
-    return "*"*(len(k)-4) + k[-4:]
+    return "*" * (len(k) - 4) + k[-4:]
+
 
 def require_review_auth(x_api_key: Optional[str]) -> str:
     expected = _expected_key()
     if not expected:
         raise HTTPException(status_code=500, detail={
-            "error":"misconfigured",
-            "reason":"missing_env_key",
-            "message":"Server misconfigured: INVYRA_AI_INGEST_API_KEY not set.",
-            "hint":"Set INVYRA_AI_INGEST_API_KEY or use the start script."
+            "error": "misconfigured",
+            "reason": "missing_env_key",
+            "message": "Server misconfigured: INVYRA_AI_INGEST_API_KEY not set.",
+            "hint": "Set INVYRA_AI_INGEST_API_KEY or use the start script.",
         })
     if (x_api_key or "").strip() != expected:
         raise HTTPException(status_code=401, detail={
-            "error":"unauthorized",
-            "reason":"missing_or_invalid_api_key",
-            "message":"Unauthorized (API key). Enter X-API-Key or restart using the provided start script.",
-            "hint": f"Expected key ending with {_mask_key(expected)[-4:]}"
+            "error": "unauthorized",
+            "reason": "missing_or_invalid_api_key",
+            "message": "Unauthorized (API key). Enter X-API-Key or restart using the provided start script.",
+            "hint": f"Expected key ending with {_mask_key(expected)[-4:]}",
         })
     return expected
 
-DECISION_MODE = "review-only"  # immutable
+
+DECISION_MODE = "review-only"
+
 
 def ai_enabled() -> bool:
-    ks = os.getenv("INVYRA_AI_KILLSWITCH","1").strip().lower()
-    return ks not in ("1","true","yes","on")
+    ks = os.getenv("INVYRA_AI_KILLSWITCH", "1").strip().lower()
+    return ks not in ("1", "true", "yes", "on")
+
 
 def ai_reason() -> str:
     return "AI enabled explicitly by operator." if ai_enabled() else "AI disabled by kill switch (default)."
 
 
-def compute_bundle_id(workspace_id: str, day: str, compare_to: str, engine_version: str, schema_version: str) -> str:
-    """Deterministic ID for audit correlation (does not hash the bundle itself)."""
-    raw = f"{workspace_id}|{day}|{compare_to}|{engine_version}|{schema_version}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def make_manifest_text(bundle: dict) -> str:
-    meta = bundle.get("meta", {})
-    lines = [
-        "INVYRA_AI_REVIEW_MANIFEST v1",
-        f"bundle_id: {meta.get('bundle_id','')}",
-        f"engine_version: {meta.get('engine_version','')}",
-        f"schema_version: {meta.get('schema_version','')}",
-        f"workspace_id: {meta.get('workspace_id','')}",
-        f"day: {meta.get('day','')}",
-        f"compare_to: {meta.get('compare_to','')}",
-        f"generated_at: {meta.get('generated_at','')}",
-        f"audit_safe: {bundle.get('ai_status',{}).get('audit_safe', True)}",
-    ]
-
-    # A8: environment context (if present)
-    ctx = meta.get("env_context") or {}
-    if ctx:
-        lines.append("")
-        lines.append("[ENV_CONTEXT]")
-        for key in ("invyra_env", "role", "terminal", "user_id", "timezone_offset", "locale", "os", "python", "arch", "hostname_hash", "generated_at_utc"):
-            lines.append(f"{key}={ctx.get(key, 'unknown')}")
-
-    return "\n".join(lines) + "\n"
-
-
 app = FastAPI(title="Invyra AI Engine", version=APP_VERSION)
+
 
 @app.exception_handler(HTTPException)
 async def http_exc_handler(_: Request, exc: HTTPException):
@@ -91,10 +67,11 @@ async def http_exc_handler(_: Request, exc: HTTPException):
     if isinstance(detail, dict):
         return JSONResponse(status_code=exc.status_code, content=detail)
     return JSONResponse(status_code=exc.status_code, content={
-        "error":"http_error",
-        "reason":"unknown",
+        "error": "http_error",
+        "reason": "unknown",
         "message": str(detail),
     })
+
 
 class EventIn(BaseModel):
     event_id: str = Field(..., min_length=1)
@@ -102,24 +79,33 @@ class EventIn(BaseModel):
     ts_utc: str = Field(..., min_length=10)
     amount: Optional[float] = None
 
+
 class IngestReq(BaseModel):
     workspace_id: str = Field(..., min_length=1)
     events: list[EventIn]
 
+
 @app.get("/health")
 def health():
-    return {"status":"ok","engine_version":APP_VERSION,"schema_version":SCHEMA_VERSION,"time_utc":datetime.now(timezone.utc).isoformat()}
+    return {
+        "status": "ok",
+        "engine_version": APP_VERSION,
+        "schema_version": SCHEMA_VERSION,
+        "time_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
 
 @app.get("/favicon.ico")
 def favicon():
     return Response(status_code=204)
+
 
 @app.get("/ai/status")
 def status(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
     require_review_auth(x_api_key)
     enabled = ai_enabled()
     return {
-        "status":"ok",
+        "status": "ok",
         "ai_enabled": enabled,
         "reason": ai_reason(),
         "level": "info" if enabled else "warning",
@@ -128,16 +114,18 @@ def status(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
         "audit_safe": True,
         "engine_version": APP_VERSION,
         "schema_version": SCHEMA_VERSION,
-        "provider": {"provider":"none","mode":DECISION_MODE,"notes":"Deterministic; no actions."}
+        "provider": {"provider": "none", "mode": DECISION_MODE, "notes": "Deterministic; no actions."},
     }
+
 
 @app.post("/actions/apply")
 def actions_apply(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
     require_review_auth(x_api_key)
     raise HTTPException(status_code=403, detail={
-        "error":"actions_disabled",
-        "message":"Actions are disabled in review-only engine"
+        "error": "actions_disabled",
+        "message": "Actions are disabled in review-only engine",
     })
+
 
 @app.post("/ingest/events")
 def ingest(req: IngestReq, x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
@@ -147,36 +135,65 @@ def ingest(req: IngestReq, x_api_key: Optional[str] = Header(default=None, alias
     results = []
     for e in req.events:
         if e.event_id in existing:
-            results.append({"event_id":e.event_id,"status":"duplicate"})
+            results.append({"event_id": e.event_id, "status": "duplicate"})
         else:
             accepted.append(e.model_dump())
             existing.add(e.event_id)
-            results.append({"event_id":e.event_id,"status":"accepted"})
+            results.append({"event_id": e.event_id, "status": "accepted"})
     if accepted:
         storage.append_events(req.workspace_id, accepted)
-    return {"accepted": sum(1 for r in results if r["status"]=="accepted"), "duplicates": sum(1 for r in results if r["status"]=="duplicate"), "results": results}
+    return {
+        "accepted": sum(1 for r in results if r["status"] == "accepted"),
+        "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
+        "results": results,
+    }
+
 
 @app.get("/patterns/day")
-def patterns_day(workspace_id: str, day: str, compare_to: str, x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+def patterns_day(
+    workspace_id: str,
+    day: str,
+    compare_to: str,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
     require_review_auth(x_api_key)
     ev = storage.list_events(workspace_id)
     a = daily_metrics(ev, day)
     b = daily_metrics(ev, compare_to)
-    payload = {"workspace_id":workspace_id,"day":day,"compare_to":compare_to,"day_metrics":a,"compare_metrics":b,"delta":delta(a,b),
-               "notes":"Deterministic output. Human must review; no actions applied."}
+    payload = {
+        "workspace_id": workspace_id,
+        "day": day,
+        "compare_to": compare_to,
+        "day_metrics": a,
+        "compare_metrics": b,
+        "delta": delta(a, b),
+        "notes": "Deterministic output. Human must review; no actions applied.",
+    }
     print(f"[REVIEW] patterns ws={workspace_id} day={day} compare={compare_to} auth=ok")
     return payload
 
+
 @app.get("/explain/day")
-def explain_day(workspace_id: str, day: str, compare_to: str, x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+def explain_day(
+    workspace_id: str,
+    day: str,
+    compare_to: str,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
     require_review_auth(x_api_key)
     patterns = patterns_day(workspace_id, day, compare_to, x_api_key=x_api_key)
     e = explain(patterns, ai_enabled())
     e["generated_at"] = datetime.now(timezone.utc).isoformat()
     return e
 
+
 @app.get("/review/bundle")
-def review_bundle(workspace_id: str, day: str, compare_to: str, x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+def review_bundle(
+    workspace_id: str,
+    day: str,
+    compare_to: str,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
     require_review_auth(x_api_key)
     s = status(x_api_key=x_api_key)
     p = patterns_day(workspace_id, day, compare_to, x_api_key=x_api_key)
@@ -195,6 +212,7 @@ def review_bundle(workspace_id: str, day: str, compare_to: str, x_api_key: Optio
             "day": day,
             "compare_to": compare_to,
             "generated_at": generated_at,
+            "decision_mode": DECISION_MODE,
         },
         "ai_status": s,
         "deterministic_patterns": p,
@@ -202,12 +220,19 @@ def review_bundle(workspace_id: str, day: str, compare_to: str, x_api_key: Optio
     }
     return bundle
 
+
 @app.get("/review/manifest")
-def review_manifest(workspace_id: str, day: str, compare_to: str, x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+def review_manifest(
+    workspace_id: str,
+    day: str,
+    compare_to: str,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
     require_review_auth(x_api_key)
     bundle = review_bundle(workspace_id, day, compare_to, x_api_key=x_api_key)
     manifest = make_manifest_text(bundle)
     return Response(content=manifest, media_type="text/plain; charset=utf-8")
+
 
 UI_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><title>Invyra AI Review</title>
 <style>
@@ -222,7 +247,7 @@ button{cursor:pointer}.primary{font-weight:600}.muted{color:#666}
 </style></head><body>
 <h1>AI Explanation Review Panel <span class="badge">READ-ONLY</span></h1>
 <p class="muted">Bundle-first flow. Humans remain in control. No actions are applied.</p>
-<p class="muted"><strong>Build:</strong> sprint-A8-env-context-pack-01</p>
+<p class="muted"><strong>Build:</strong> sprint-A8.1-repository-stabilization-01</p>
 
 <div id="errorBanner" role="alert" aria-live="polite" tabindex="-1" hidden></div>
 
@@ -423,6 +448,7 @@ async function loadBundle(){
   setExportEnabled(false);
 })();
 </script></body></html>'''
+
 
 @app.get("/ui/ai-review", response_class=HTMLResponse)
 def ui():
