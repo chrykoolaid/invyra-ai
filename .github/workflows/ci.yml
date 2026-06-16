@@ -24,6 +24,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Import guard
+        env:
+          INVYRA_AI_INGEST_API_KEY: test_key_123
+        run: |
+          python -c "import app.manifest; import app.web; import app.server; print('import guard ok')"
+
       - name: CI smoke (start server -> test -> stop)
         env:
           INVYRA_AI_INGEST_API_KEY: test_key_123
